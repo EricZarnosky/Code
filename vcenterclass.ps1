@@ -1,15 +1,16 @@
-# REORDERED: Define dependent classes first, then VsVCenter
-# FIXED: Class property syntax now uses $ on all properties
-
 # ----- Cluster class -----
 class VsCluster {
     [string] $Name
-    [bool]   $HAEnabld            # maps from Cluster.HAEnabled
-    [bool]   $DRSEnabled          # maps from Cluster.DrsEnabled
-    [string] $DRSAutomationLevel  # maps from Cluster.DrsAutomationLevel
-    [bool]   $VsanEnabled         # maps from Cluster.VsanEnabled
-    [string] $VsanDiskClaimMode   # maps from Cluster.VsanDiskClaimMode
-    [string] $EVCMode             # maps from Cluster.EVCMode
+    [bool]   $HAEnabld
+    [bool]   $DRSEnabled
+    [string] $DRSAutomationLevel
+    [bool]   $VsanEnabled
+    [string] $VsanDiskClaimMode
+    [string] $EVCMode
+
+    # NEW: Hosts list under each cluster
+    [System.Collections.Generic.List[VsHost]] $Hosts = [System.Collections.Generic.List[VsHost]]::new()
+
     VsCluster() {}
 }
 
@@ -18,6 +19,22 @@ class VsDataCenter {
     [string] $Name
     [System.Collections.Generic.List[VsCluster]] $Clusters = [System.Collections.Generic.List[VsCluster]]::new()
     VsDataCenter([string]$name) { $this.Name = $name }
+}
+
+# NEW: ESXi Host class
+class VsHost {
+    [string] $Parent         # cluster name
+    [string] $Name
+    [string] $PowerState
+    [string] $Manufacturer
+    [string] $Model
+    [string] $CPUType        # ProcessorType, with (R) stripped
+    [int]    $CPUs           # NumCPU
+    [string] $MemoryGB       # MemoryTotalGB formatted "{0:N0}"
+    [string] $Version
+    [string] $Build
+    [string] $Timezone
+    VsHost() {}
 }
 
 # ----- vCenter class -----
@@ -30,7 +47,6 @@ class VsVCenter {
     [string] $ConnectedAs
     [string] $SessionId
 
-    # CHANGED: DataCenters (note casing) now a list of VsDataCenter
     [System.Collections.Generic.List[VsDataCenter]] $DataCenters = [System.Collections.Generic.List[VsDataCenter]]::new()
 
     VsVCenter() {}
@@ -77,9 +93,46 @@ class VsVCenter {
             }
         }
     }
+
+    # NEW: Populate ESXi hosts under each cluster
+    [void] LoadHosts() {
+        foreach ($dc in $this.DataCenters) {
+            $dcObj = Get-Datacenter -Server $this.Name -Name $dc.Name -ErrorAction SilentlyContinue
+            if (-not $dcObj) { continue }
+
+            foreach ($cl in $dc.Clusters) {
+                $clObj = Get-Cluster -Server $this.Name -Name $cl.Name -Location $dcObj -ErrorAction SilentlyContinue
+                if (-not $clObj) { continue }
+
+                $hosts = Get-VMHost -Server $this.Name -Location $clObj -ErrorAction SilentlyContinue
+                foreach ($h in $hosts) {
+                    if (-not ($cl.Hosts | Where-Object { $_.Name -eq $h.Name })) {
+                        $vh = [VsHost]::new()
+                        $vh.Parent      = $cl.Name
+                        $vh.Name        = $h.Name
+                        $vh.PowerState  = [string]$h.PowerState
+                        $vh.Manufacturer= [string]$h.Manufacturer
+                        $vh.Model       = [string]$h.Model
+                        $vh.CPUType     = ([string]$h.ProcessorType) -replace '\(R\)',''  # strip (R)
+                        $vh.CPUs        = [int]$h.NumCpu
+                        $vh.MemoryGB    = ('{0:N0}' -f [double]$h.MemoryTotalGB)
+                        $vh.Version     = [string]$h.Version
+                        $vh.Build       = [string]$h.Build
+                        # Some builds expose TimeZone or Timezone; try both safely
+                        $vh.Timezone    = ($h | Select-Object -ExpandProperty TimeZone -ErrorAction SilentlyContinue)
+                        if (-not $vh.Timezone) {
+                            $tz = ($h | Select-Object -ExpandProperty Timezone -ErrorAction SilentlyContinue)
+                            if ($tz) { $vh.Timezone = [string]$tz } else { $vh.Timezone = '' }
+                        }
+                        [void]$cl.Hosts.Add($vh)
+                    }
+                }
+            }
+        }
+    }
 }
 
-# -------- Driver code (unchanged except for method names) --------
+# -------- Driver code --------
 
 # Example: list of vCenter names you are connected to
 $names = @('vcsa01.domain.tld','vcsa02.domain.tld')
@@ -94,24 +147,31 @@ foreach ($vi in $viServers) {
     $obj = [VsVCenter]::FromVIServer($vi)
     $obj.LoadDataCenters()
     $obj.LoadClusters()
+    $obj.LoadHosts()     # NEW
     $vcenters.Add($obj) | Out-Null
 }
 
-# Quick view (flattened)
+# Quick view: flatten vCenter → DataCenter → Cluster → Host
 $vcenters | ForEach-Object {
     $vc = $_
     foreach ($dc in $vc.DataCenters) {
         foreach ($cl in $dc.Clusters) {
-            [pscustomobject]@{
-                vCenter            = $vc.Name
-                DataCenter         = $dc.Name
-                Cluster            = $cl.Name
-                HAEnabld           = $cl.HAEnabld
-                DRSEnabled         = $cl.DRSEnabled
-                DRSAutomationLevel = $cl.DRSAutomationLevel
-                VsanEnabled        = $cl.VsanEnabled
-                VsanDiskClaimMode  = $cl.VsanDiskClaimMode
-                EVCMode            = $cl.EVCMode
+            foreach ($h in $cl.Hosts) {
+                [pscustomobject]@{
+                    vCenter     = $vc.Name
+                    DataCenter  = $dc.Name
+                    Cluster     = $cl.Name
+                    Host        = $h.Name
+                    PowerState  = $h.PowerState
+                    Manufacturer= $h.Manufacturer
+                    Model       = $h.Model
+                    CPUType     = $h.CPUType
+                    CPUs        = $h.CPUs
+                    MemoryGB    = $h.MemoryGB
+                    Version     = $h.Version
+                    Build       = $h.Build
+                    Timezone    = $h.Timezone
+                }
             }
         }
     }
