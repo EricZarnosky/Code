@@ -1,4 +1,26 @@
-# Define the class
+# REORDERED: Define dependent classes first, then VsVCenter
+# FIXED: Class property syntax now uses $ on all properties
+
+# ----- Cluster class -----
+class VsCluster {
+    [string] $Name
+    [bool]   $HAEnabld            # maps from Cluster.HAEnabled
+    [bool]   $DRSEnabled          # maps from Cluster.DrsEnabled
+    [string] $DRSAutomationLevel  # maps from Cluster.DrsAutomationLevel
+    [bool]   $VsanEnabled         # maps from Cluster.VsanEnabled
+    [string] $VsanDiskClaimMode   # maps from Cluster.VsanDiskClaimMode
+    [string] $EVCMode             # maps from Cluster.EVCMode
+    VsCluster() {}
+}
+
+# ----- Datacenter class -----
+class VsDataCenter {
+    [string] $Name
+    [System.Collections.Generic.List[VsCluster]] $Clusters = [System.Collections.Generic.List[VsCluster]]::new()
+    VsDataCenter([string]$name) { $this.Name = $name }
+}
+
+# ----- vCenter class -----
 class VsVCenter {
     [string] $Name
     [int]    $Port
@@ -8,7 +30,7 @@ class VsVCenter {
     [string] $ConnectedAs
     [string] $SessionId
 
-    # CHANGED: DataCenters now a list of VsDataCenter
+    # CHANGED: DataCenters (note casing) now a list of VsDataCenter
     [System.Collections.Generic.List[VsDataCenter]] $DataCenters = [System.Collections.Generic.List[VsDataCenter]]::new()
 
     VsVCenter() {}
@@ -25,7 +47,6 @@ class VsVCenter {
         return $o
     }
 
-    # Populate datacenters for this vCenter
     [void] LoadDataCenters() {
         $dcObjs = Get-Datacenter -Server $this.Name -ErrorAction SilentlyContinue
         foreach ($dcObj in $dcObjs) {
@@ -35,7 +56,6 @@ class VsVCenter {
         }
     }
 
-    # Populate clusters under each datacenter (scoped to this vCenter)
     [void] LoadClusters() {
         foreach ($dc in $this.DataCenters) {
             $dcObj = Get-Datacenter -Server $this.Name -Name $dc.Name -ErrorAction SilentlyContinue
@@ -46,14 +66,12 @@ class VsVCenter {
                 if (-not ($dc.Clusters | Where-Object { $_.Name -eq $cl.Name })) {
                     $cluster = [VsCluster]::new()
                     $cluster.Name               = $cl.Name
-                    # CHANGED: HAEnabled instead of NAEnabld
                     $cluster.HAEnabld           = [bool]$cl.HAEnabled
                     $cluster.DRSEnabled         = [bool]$cl.DrsEnabled
                     $cluster.DRSAutomationLevel = [string]$cl.DrsAutomationLevel
                     $cluster.VsanEnabled        = [bool]$cl.VsanEnabled
                     $cluster.VsanDiskClaimMode  = [string]$cl.VsanDiskClaimMode
                     $cluster.EVCMode            = [string]$cl.EVCMode
-
                     [void]$dc.Clusters.Add($cluster)
                 }
             }
@@ -61,24 +79,7 @@ class VsVCenter {
     }
 }
 
-# CHANGED: renamed VsDatacenter → VsDataCenter
-class VsDataCenter {
-    [string] Name
-    [System.Collections.Generic.List[VsCluster]] Clusters = [System.Collections.Generic.List[VsCluster]]::new()
-    VsDataCenter([string]$name) { $this.Name = $name }
-}
-
-# Cluster class
-class VsCluster {
-    [string] Name
-    [bool]   HAEnabld            # CHANGED: HAEnabld instead of NAEnabld
-    [bool]   DRSEnabled
-    [string] DRSAutomationLevel
-    [bool]   VsanEnabled
-    [string] VsanDiskClaimMode
-    [string] EVCMode
-    VsCluster() {}
-}
+# -------- Driver code (unchanged except for method names) --------
 
 # Example: list of vCenter names you are connected to
 $names = @('vcsa01.domain.tld','vcsa02.domain.tld')
@@ -86,7 +87,7 @@ $names = @('vcsa01.domain.tld','vcsa02.domain.tld')
 # Grab VIServer objects
 $viServers = Get-VIServer -Server $names
 
-# Create a strongly typed generic list
+# Strongly typed list of vCenters
 $vcenters = New-Object 'System.Collections.Generic.List[VsVCenter]'
 
 foreach ($vi in $viServers) {
@@ -96,7 +97,7 @@ foreach ($vi in $viServers) {
     $vcenters.Add($obj) | Out-Null
 }
 
-# Show results (flatten for readability)
+# Quick view (flattened)
 $vcenters | ForEach-Object {
     $vc = $_
     foreach ($dc in $vc.DataCenters) {
